@@ -1,109 +1,124 @@
-# [CVPR 2023]Prototype-based Embedding Network for Scene Graph Generation
+# Tail Prototype Drift Correction for Long-Tailed Scene Graph Generation
 
-This repository contains the official code implementation for the paper [Prototype-based Embedding Network for Scene Graph Generation](https://arxiv.org/abs/2303.07096).
+Official implementation of **"Tail Prototype Drift: Empirical Calibration and Confusion-Guided Repulsion for Long-Tailed Scene Graph Generation"** (ICONIP 2026).
+
+## Overview
+
+Prototype-based scene graph generation (SGG) methods represent each predicate class with a learned semantic prototype. Under long-tailed predicate distributions, we observe that tail-class prototypes drift away from the empirical centers of their relation features — a phenomenon we term *Tail Prototype Drift* (TPD). This geometric misalignment degrades tail-class recognition.
+
+We propose two post-training correction losses that operate on a frozen PE-Net checkpoint:
+
+- **TEPA** (Tail-aware Empirical Prototype Alignment): aligns tail prototypes with their EMA-estimated empirical relation centers.
+- **CPTR** (Confusion-Pair Targeted Repulsion): pushes tail prototypes away from their most confusable head counterparts, identified via subject-object distribution overlap (Bhattacharyya coefficient).
+
+Combined with class-balanced relation loss reweighting, the resulting **TPD-Net** substantially improves mean Recall while maintaining competitive Recall.
+
+## Main Results
+
+### Visual Genome (VG150)
+
+| Model | Task | R@50 | mR@50 | F@50 |
+|-------|------|------|-------|------|
+| PE-Net (baseline) | PredCls | 64.90 | 31.50 | 42.41 |
+| **TPD-Net** | **PredCls** | **58.84** | **40.94** | **48.28** |
+| **TPD-Net** | **SGCls** | **36.64** | **21.86** | **27.38** |
+| **TPD-Net** | **SGDet** | **27.75** | **15.68** | **20.04** |
+
+### GQA-200
+
+| Model | Task | R@50 | mR@50 | F@50 |
+|-------|------|------|-------|------|
+| PE-Net (baseline) | PredCls | 54.30 | 26.20 | 35.40 |
+| **TPD-Net** | **PredCls** | **52.46** | **37.49** | **43.73** |
 
 ## Installation
-Check [INSTALL.md](./INSTALL.md) for installation instructions.
 
-## Dataset
+See [INSTALL.md](INSTALL.md) for detailed instructions.
 
-Check [DATASET.md](./DATASET.md) for instructions of dataset preprocessing.
+**Quick start:**
 
-## Train
-We provide [scripts](./scripts/train.sh) for training the models
-```
-export CUDA_VISIBLE_DEVICES=1
-export NUM_GUP=1
-echo "TRAINING Predcls"
+```bash
+git clone https://github.com/yanshikun2963/TEPA-CPTR.git
+cd TEPA-CPTR
 
-MODEL_NAME='PE-NET_PredCls'
-mkdir ./checkpoints/${MODEL_NAME}/
-cp ./tools/relation_train_net.py ./checkpoints/${MODEL_NAME}/
-cp ./maskrcnn_benchmark/modeling/roi_heads/relation_head/roi_relation_predictors.py ./checkpoints/${MODEL_NAME}/
-cp ./maskrcnn_benchmark/modeling/roi_heads/relation_head/model_transformer.py ./checkpoints/${MODEL_NAME}/
-cp ./maskrcnn_benchmark/modeling/roi_heads/relation_head/loss.py ./checkpoints/${MODEL_NAME}/
-cp ./scripts/train.sh ./checkpoints/${MODEL_NAME}/
-cp ./maskrcnn_benchmark/modeling/roi_heads/relation_head/relation_head.py ./checkpoints/${MODEL_NAME}
+# Create conda environment
+conda create -n tpdnet python=3.8 -y
+conda activate tpdnet
 
-python3 \
-  tools/relation_train_net.py \
-  --config-file "configs/e2e_relation_X_101_32_8_FPN_1x.yaml" \
-  MODEL.ROI_RELATION_HEAD.USE_GT_BOX True \
-  MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL True \
-  MODEL.ROI_RELATION_HEAD.PREDICT_USE_BIAS True \
-  MODEL.ROI_RELATION_HEAD.PREDICTOR PrototypeEmbeddingNetwork \
-  DTYPE "float32" \
-  SOLVER.IMS_PER_BATCH 8 TEST.IMS_PER_BATCH $NUM_GUP \
-  SOLVER.MAX_ITER 60000 SOLVER.BASE_LR 1e-3 \
-  SOLVER.SCHEDULE.TYPE WarmupMultiStepLR \
-  MODEL.ROI_RELATION_HEAD.BATCH_SIZE_PER_IMAGE 512 \
-  SOLVER.STEPS "(28000, 48000)" SOLVER.VAL_PERIOD 30000 \
-  SOLVER.CHECKPOINT_PERIOD 30000 GLOVE_DIR ./datasets/vg/ \
-  MODEL.PRETRAINED_DETECTOR_CKPT ./checkpoints/pretrained_faster_rcnn/model_final.pth \
-  OUTPUT_DIR ./checkpoints/${MODEL_NAME} \
-  SOLVER.PRE_VAL False \
-  SOLVER.GRAD_NORM_CLIP 5.0;
-
+# Install dependencies
+pip install -r requirements.txt
+python setup.py build develop
 ```
 
-## Test
-We provide [scripts](./scripts/test.sh) for testing the models
-```
-export CUDA_VISIBLE_DEVICES=3
-export NUM_GUP=1
-echo "Testing!!!!"
-MODEL_NAME="PE-NET_PredCls"
-python3 \
-    tools/relation_test_net.py \
-    --config-file "configs/e2e_relation_X_101_32_8_FPN_1x.yaml" \
-    MODEL.ROI_RELATION_HEAD.USE_GT_BOX True \
-    MODEL.ROI_RELATION_HEAD.USE_GT_OBJECT_LABEL True \
-    MODEL.ROI_RELATION_HEAD.PREDICTOR PrototypeEmbeddingNetwork \
-    TEST.IMS_PER_BATCH 1 DTYPE "float32" \
-    GLOVE_DIR ./datasets/vg/ \
-    MODEL.PRETRAINED_DETECTOR_CKPT ./checkpoints/pretrained_faster_rcnn/model_final.pth \
-    MODEL.WEIGHT ./checkpoints/${MODEL_NAME}/model_final.pth \
-    OUTPUT_DIR ./checkpoints/${MODEL_NAME} \
-    TEST.ALLOW_LOAD_FROM_CACHE False \
+## Dataset Preparation
+
+See [DATASET.md](DATASET.md) for VG-150 and GQA-200 dataset setup instructions.
+
+## Usage
+
+### Step 1: Obtain PE-Net Baseline Checkpoint
+
+Train PE-Net from scratch or download a pretrained checkpoint:
+
+```bash
+bash scripts/train.sh
 ```
 
+Place the trained checkpoint at `checkpoints/PENET_baseline/model_final.pth`.
 
-## Device
+### Step 2: Build Confusion Pair Tables
 
-All our experiments are conducted on one NVIDIA GeForce RTX 3090, if you wanna run it on your own device, make sure to follow distributed training instructions in [Scene-Graph-Benchmark.pytorch](https://github.com/KaihuaTang/Scene-Graph-Benchmark.pytorch).
+```bash
+python datasets/prepare_freq_table.py
+python datasets/prepare_confusion_pairs.py
+```
 
+This produces `datasets/vg/soo_freq.npy` and `datasets/vg/cptr_pairs_filtered.npy`.
 
+### Step 3: Train TPD-Net
 
-## The Trained Model Weights
+```bash
+bash scripts/train_tpdnet.sh
+```
 
-We provide the weights for the  model. Due to random seeds and machines, they are not completely consistent with those reported in the paper, but they are within the allowable error range.
+### Step 4: Evaluate
 
-|      Model       | R@20  | R@50  | R@100 | mR@20 | mR@50 | mR@100 |                         Google Drive                         |
-| :--------------: | :---: | :---: | :---: | :---: | :---: | :----: | :----------------------------------------------------------: |
-| PE-Net (PredCls) | 58.21 | 65.23 | 67.34 | 25.83 | 31.42 | 33.48  | [Model Link](https://drive.google.com/file/d/1rjsLs3N33iiOB5xYO7zetNhR7ebi385W/view?usp=share_link) \| [Log Link](https://drive.google.com/file/d/1YK0dLWVkmfWQjpreBdeWi4H0XyV61XMl/view?usp=share_link) |
-|  PE-Net (SGCls)  | 35.28 | 39.13 | 40.19 | 15.23 | 18.22 | 19.34  | [Model Link](https://drive.google.com/file/d/1uRl-O-yXmpCs__l_V-WTdYtbWPl57M1B/view?usp=share_link) \| [Log Link](https://drive.google.com/file/d/13mjhmEEvQtwHeinrrbgIJFgDQSuryvCL/view?usp=share_link) |
-|  PE-Net (SGDet)  | 23.36 | 30.41 | 34.84 | 9.16  | 12.25 | 14.34  | [Model Link](https://drive.google.com/file/d/1Ed6PkATiig0xpFuQYL-G5trFifhPpc0C/view?usp=share_link) \| [Log Link](https://drive.google.com/file/d/1cweQarIDB0PWCA3Xt94-_AGItdw6EQ5h/view?usp=share_link) |
+```bash
+bash scripts/test_tpdnet.sh
+```
 
-## Tips
+## Pretrained Models
 
-We use the `rel_nms` [operation](./maskrcnn_benchmark/data/datasets/evaluation/vg/sgg_eval.py) provided by [RU-Net](https://github.com/siml3/RU-Net/blob/main/maskrcnn_benchmark/data/datasets/evaluation/vg/sgg_eval.py) and [HL-Net](https://github.com/siml3/HL-Net/blob/main/maskrcnn_benchmark/data/datasets/evaluation/vg/sgg_eval.py) in PredCls and SGCls to filter the predicted relation predicates, which encourages diverse prediction results. 
+| Model | Task | Checkpoint | Training Log |
+|-------|------|------------|--------------|
+| PE-Net baseline | PredCls | [Google Drive](https://drive.google.com/file/d/1rjsLs3N33iiOB5xYO7zetNhR7ebi385W/view?usp=share_link) | [Log](https://drive.google.com/file/d/1YK0dLWVkmfWQjpreBdeWi4H0XyV61XMl/view?usp=share_link) |
+| TPD-Net | PredCls | Coming soon | Coming soon |
 
-## Help
+## Method Summary
 
-Be free to contact me (`zheng_chaofan@foxmail.com`) if you have any questions!
+Given a trained prototype-based SGG model, TPD-Net resumes training with two correction losses:
 
-## Acknowledgement
+**TEPA** maintains an exponential moving average of per-class relation feature centers. For each tail predicate (frequency below median), it minimises the cosine distance between the learned prototype and its empirical center. The alignment is restricted to tail classes to preserve head-class decision boundaries.
 
-The code is implemented based on [Scene-Graph-Benchmark.pytorch](https://github.com/KaihuaTang/Scene-Graph-Benchmark.pytorch).
+**CPTR** identifies confusable (tail, head) predicate pairs by measuring subject-object distribution overlap via the Bhattacharyya coefficient. For the top-K most overlapping head predicates per tail class, a smoothed-hinge repulsion loss pushes the tail prototype away from the (stop-gradient) head prototype.
+
+Both losses are activated after a warmup period and introduce no additional inference cost.
 
 ## Citation
 
-```
-@inproceedings{zheng2023prototype,
-  title={Prototype-based Embedding Network for Scene Graph Generation},
-  author={Zheng, Chaofan and Lyu, Xinyu and Gao, Lianli and Dai, Bo and Song, Jingkuan},
-  booktitle={Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition},
-  pages={22783--22792},
-  year={2023}
+```bibtex
+@inproceedings{yan2026tpdnet,
+  title={Tail Prototype Drift: Empirical Calibration and Confusion-Guided Repulsion for Long-Tailed Scene Graph Generation},
+  author={Yan, Shikun and others},
+  booktitle={International Conference on Neural Information Processing (ICONIP)},
+  year={2026}
 }
 ```
+
+## Acknowledgement
+
+This codebase is built upon [PE-Net](https://github.com/VL-Group/PENET) (Zheng et al., CVPR 2023) and [Scene-Graph-Benchmark.pytorch](https://github.com/KaihuaTang/Scene-Graph-Benchmark.pytorch) (Tang et al.).
+
+## License
+
+This project is released under the [MIT License](LICENSE).

@@ -1,0 +1,51 @@
+# Datasets (large, user downloads separately)
+Datasets/
+datasets/vg/VG-SGG-with-attri.h5
+datasets/vg/VG_100K/
+datasets/vg/glove*
+datasets/gqa/
+
+# Checkpoints
+checkpoints/
+*.pth
+
+# Training outputs
+output/
+inference/
+
+# Experiment artifacts
+drift_analysis*/
+drift_dynamics/
+exp1_per_class/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+*.so
+
+# Logs and caches
+*.log
+*.cache
+wandb/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Backup files from patching (should not exist in clean release)
+*.backup_*
