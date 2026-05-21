@@ -128,61 +128,40 @@ class PrototypeEmbeddingNetwork(nn.Module):
         
         self.nms_thresh = self.cfg.TEST.RELATION.LATER_NMS_PREDICTION_THRES
 
-        # ============================================================
-        # New components: A1 (EMA Memory Bank), B1 (Prototype Alignment)
-        # ============================================================
+        # TEPA / CPTR setup
         import os as _os
         self.register_buffer('_comp_iter', torch.tensor(0, dtype=torch.long))
 
         _rcfg = config.MODEL.ROI_RELATION_HEAD
-        self.use_a1 = getattr(_rcfg, 'USE_A1_MEMORY', False)
-        self.use_b1 = getattr(_rcfg, 'USE_B1_ALIGN', False)
+        self.use_tepa = getattr(_rcfg, 'USE_TEPA', False)
 
-        # A1/B1 shared class statistics
-        if self.use_a1 or self.use_b1:
-            _feat_dim = self.mlp_dim * 2  # 4096 (after project_head)
+        if self.use_tepa:
+            _feat_dim = self.mlp_dim * 2
             self.register_buffer('class_mean', torch.zeros(self.num_rel_cls, _feat_dim))
             self.register_buffer('class_var', torch.ones(self.num_rel_cls, _feat_dim))
             self.register_buffer('class_count', torch.zeros(self.num_rel_cls))
 
-            _stats_path = ''
-            if self.use_a1:
-                _stats_path = getattr(_rcfg, 'A1_STATS_INIT_PATH', '')
-            if not _stats_path and self.use_b1:
-                _stats_path = getattr(_rcfg, 'B1_STATS_INIT_PATH', '')
+            _stats_path = getattr(_rcfg, 'TEPA_STATS_INIT_PATH', '')
             if _stats_path and _os.path.exists(_stats_path):
                 _stats = torch.load(_stats_path, map_location='cpu')
                 self.class_mean.copy_(_stats['class_mean'])
                 self.class_var.copy_(_stats['class_var'])
                 self.class_count.copy_(_stats['class_count'])
-                print(f"[Component] Loaded class stats from {_stats_path}")
-                print(f"[Component]   class_count: min={self.class_count.min().item():.0f}, max={self.class_count.max().item():.0f}")
+                print(f"[TEPA] Loaded empirical statistics from {_stats_path}")
             else:
-                print(f"[Component] No stats init; will accumulate EMA during training (warmup applies).")
+                print(f"[TEPA] Empirical centers will be accumulated by EMA during training.")
 
-        # ============================================================
-        # CPTR: Confusion-Pair Targeted Repulsion (v2)
-        # ============================================================
         self.use_cptr = getattr(_rcfg, 'USE_CPTR', False)
         if self.use_cptr:
             import numpy as _np
             _cptr_path = getattr(_rcfg, 'CPTR_PAIRS_PATH', '')
             assert _cptr_path and _os.path.exists(_cptr_path), \
-                f"[CPTR] pairs file missing: {_cptr_path}"
+                f"[CPTR] confusion pairs file missing: {_cptr_path}"
             _cptr_pairs = _np.load(_cptr_path)  # (P, 3): [tail, head, weight]
             self.register_buffer('cptr_tail', torch.tensor(_cptr_pairs[:, 0], dtype=torch.long))
             self.register_buffer('cptr_head', torch.tensor(_cptr_pairs[:, 1], dtype=torch.long))
             self.register_buffer('cptr_weight', torch.tensor(_cptr_pairs[:, 2], dtype=torch.float32))
-            print("=" * 60)
-            print(f"[CPTR] ENABLED (v2: head-detached, gentle weight, warmup)")
-            print(f"[CPTR]   loaded {len(_cptr_pairs)} confused (tail, head) pairs")
-            print(f"[CPTR]   weight={getattr(_rcfg, 'CPTR_WEIGHT', 0.05)}, "
-                  f"margin={getattr(_rcfg, 'CPTR_MARGIN', 0.3)}, "
-                  f"k_sharp={getattr(_rcfg, 'CPTR_K_SHARPNESS', 10.0)}, "
-                  f"warmup={getattr(_rcfg, 'CPTR_WARMUP_ITER', 5000)}")
-            print("=" * 60)
-        else:
-            print("[CPTR] DISABLED")
+            print(f"[CPTR] Loaded {len(_cptr_pairs)} (tail, head) confusion pairs from {_cptr_path}")
 
 
 
@@ -268,23 +247,13 @@ class PrototypeEmbeddingNetwork(nn.Module):
             ### Prototype Regularization  ---- cosine similarity
             target_rpredicate_proto_norm = predicate_proto_norm.clone().detach() 
             simil_mat = predicate_proto_norm @ target_rpredicate_proto_norm.t()  # Semantic Matrix S = C_norm @ C_norm.T
-            # RPR: Reinforced Prototype Regularization
-            # Compensates for B1's tendency to collapse prototype space (mlp_proto -> emp_mean
-            # pulls prototypes toward each other since empirical means cluster). Boost only
-            # activates when B1 is on; preserves original PE-Net behavior otherwise.
-            _pr_boost = getattr(self.cfg.MODEL.ROI_RELATION_HEAD, 'B1_PR_BOOST', 1.0) if getattr(self, 'use_b1', False) else 1.0
-            l21 = torch.norm(torch.norm(simil_mat, p=2, dim=1), p=1) / (51*51) * _pr_boost
+            l21 = torch.norm(torch.norm(simil_mat, p=2, dim=1), p=1) / (51*51)
             add_losses.update({"l21_loss": l21})  # Le_sim = ||S||_{2,1}
             ### end
 
-            # ============================================================
-            # CPTR v2: Confusion-Pair Targeted Repulsion
-            # Pushes the TAIL prototype away from the prototypes of HEAD
-            # predicates it tends to be confused with. The head prototype is
-            # DETACHED (FIX 1): only the tail prototype moves, so head
-            # decision boundaries -- and therefore R@50 -- are preserved.
-            # Gated by a warmup (FIX 3) so TEPA settles first.
-            # ============================================================
+            # CPTR: Confusion-Pair Targeted Repulsion.
+            # Push each tail prototype away from its confusing head counterparts.
+            # The head side is detached, so only the tail prototype is updated.
             if self.use_cptr and self.cptr_tail.numel() > 0:
                 _rcfg_cptr = self.cfg.MODEL.ROI_RELATION_HEAD
                 _cptr_warmup = getattr(_rcfg_cptr, 'CPTR_WARMUP_ITER', 5000)
@@ -292,11 +261,9 @@ class PrototypeEmbeddingNetwork(nn.Module):
                     _cptr_w = getattr(_rcfg_cptr, 'CPTR_WEIGHT', 0.05)
                     _cptr_m = getattr(_rcfg_cptr, 'CPTR_MARGIN', 0.3)
                     _cptr_k = getattr(_rcfg_cptr, 'CPTR_K_SHARPNESS', 10.0)
-                    # FIX 1: detach the head side -> one-directional push
                     _proto_tail = predicate_proto_norm[self.cptr_tail]
                     _proto_head = predicate_proto_norm[self.cptr_head].detach()
                     _cos = (_proto_tail * _proto_head).sum(dim=-1)
-                    # smoothed hinge: penalize cos(tail, head) > margin
                     _hinge = F.softplus(_cptr_k * (_cos - _cptr_m)) / _cptr_k
                     _cptr_loss = (_hinge * self.cptr_weight).mean() * _cptr_w
                     add_losses.update({"loss_cptr": _cptr_loss})
@@ -327,33 +294,26 @@ class PrototypeEmbeddingNetwork(nn.Module):
             loss_sum = torch.max(torch.zeros(rel_labels.size(0)).cuda(), distance_set_pos - topK_sorted_distance_set_neg + gamma1).mean()
             add_losses.update({"loss_dis": loss_sum})     # Le_euc = max(0, (g+) - (g-) + gamma1)
 
-            # ============================================================
-            # New components: A1 (EMA Memory Bank), B1 (Prototype Alignment)
-            # ============================================================
-            if self.use_a1 or self.use_b1:
+            # TEPA: update empirical centers and compute alignment loss.
+            if self.use_tepa:
                 self._comp_iter += 1
                 with torch.no_grad():
-                    self._update_class_stats(rel_rep, rel_labels)
-                if self.use_a1:
-                    _loss_a1 = self._a1_synth_loss(predicate_proto_norm)
-                    if _loss_a1 is not None:
-                        add_losses.update({"loss_a1_aug": _loss_a1})
-                if self.use_b1:
-                    _loss_b1 = self._b1_align_loss(predicate_proto)
-                    if _loss_b1 is not None:
-                        add_losses.update({"loss_b1_align": _loss_b1})
+                    self._update_empirical_centers(rel_rep, rel_labels)
+                _loss_tepa = self._tepa_loss(predicate_proto)
+                if _loss_tepa is not None:
+                    add_losses.update({"loss_tepa": _loss_tepa})
             ### end 
  
         return entity_dists, rel_dists, add_losses, add_data
 
 
-    # ============================================================
-    # Helper methods for new components (A1, B1)
-    # ============================================================
-    def _update_class_stats(self, rel_rep, rel_labels):
-        """Update per-class mean and variance via EMA."""
+    # ------------------------------------------------------------
+    # TEPA helper methods
+    # ------------------------------------------------------------
+    def _update_empirical_centers(self, rel_rep, rel_labels):
+        """EMA update of per-class empirical relation centers used by TEPA."""
         _rcfg = self.cfg.MODEL.ROI_RELATION_HEAD
-        momentum = getattr(_rcfg, 'A1_EMA_MOMENTUM', 0.95)
+        momentum = getattr(_rcfg, 'TEPA_EMA_MOMENTUM', 0.95)
         rel_rep_d = rel_rep.detach()
         for c in torch.unique(rel_labels):
             c_int = int(c.item())
@@ -377,66 +337,27 @@ class PrototypeEmbeddingNetwork(nn.Module):
                 self.class_var[c_int].mul_(momentum).add_(batch_var, alpha=1.0 - momentum)
             self.class_count[c_int] += n_c
 
-    def _a1_synth_loss(self, predicate_proto_norm):
-        """A1: Generate synthetic features for tail classes; return CE loss (or None during warmup)."""
+    def _tepa_loss(self, predicate_proto):
+        """TEPA: cosine alignment between predicate prototypes and their empirical centers.
+
+        Active set: classes with at least TEPA_MIN_COUNT EMA samples. If
+        TEPA_TAIL_ONLY is True, the set is further restricted to predicates
+        with frequency below the median.
+        """
         _rcfg = self.cfg.MODEL.ROI_RELATION_HEAD
-        warmup = getattr(_rcfg, 'A1_WARMUP_ITER', 3000)
+        warmup = getattr(_rcfg, 'TEPA_WARMUP_ITER', 5000)
         if int(self._comp_iter.item()) < warmup:
             return None
 
-        n_per_class = getattr(_rcfg, 'A1_N_AUG_PER_CLASS', 8)
-        aug_w = getattr(_rcfg, 'A1_AUG_WEIGHT', 0.3)
-
-        rel_prop = list(_rcfg.REL_PROP)
-        freq = [0.0] + rel_prop
-        med = sorted(rel_prop)[len(rel_prop) // 2]
-        tail_classes = [c for c in range(1, self.num_rel_cls)
-                       if freq[c] < med and self.class_count[c].item() >= 20]
-        if len(tail_classes) == 0:
-            return None
-
-        device = predicate_proto_norm.device
-        aug_feats_list = []
-        aug_labels_list = []
-        for c in tail_classes:
-            mean = self.class_mean[c].to(device)
-            std = self.class_var[c].to(device).clamp(min=1e-6).sqrt()
-            eps = torch.randn(n_per_class, mean.shape[0], device=device)
-            samples = mean + 0.5 * eps * std
-            aug_feats_list.append(samples)
-            aug_labels_list.append(torch.full((n_per_class,), c, dtype=torch.long, device=device))
-
-        aug_feats = torch.cat(aug_feats_list, dim=0)
-        aug_labels = torch.cat(aug_labels_list, dim=0)
-
-        aug_norm = aug_feats / (aug_feats.norm(dim=1, keepdim=True) + 1e-8)
-        # NOTE: do NOT detach predicate_proto_norm here. If we detach, the only
-        # learnable tensor in aug_logits is logit_scale (a single scalar), and
-        # the synthetic loss becomes effectively useless. With aug_w=0.3 the
-        # influence on prototypes is already bounded.
-        aug_logits = aug_norm @ predicate_proto_norm.t() * self.logit_scale.exp()
-        aug_logits = aug_logits.clamp(-20, 20)
-        loss = F.cross_entropy(aug_logits, aug_labels) * aug_w
-        return loss
-
-    def _b1_align_loss(self, predicate_proto):
-        """B1: Cosine alignment between MLP-prototypes and empirical class-mean."""
-        _rcfg = self.cfg.MODEL.ROI_RELATION_HEAD
-        warmup = getattr(_rcfg, 'B1_WARMUP_ITER', 5000)
-        if int(self._comp_iter.item()) < warmup:
-            return None
-
-        min_count = getattr(_rcfg, 'B1_MIN_COUNT', 100)
-        align_w = getattr(_rcfg, 'B1_ALIGN_WEIGHT', 0.2)
-        tail_only = getattr(_rcfg, 'B1_TAIL_ONLY', True)
+        min_count = getattr(_rcfg, 'TEPA_MIN_COUNT', 100)
+        align_w = getattr(_rcfg, 'TEPA_WEIGHT', 0.4)
+        tail_only = getattr(_rcfg, 'TEPA_TAIL_ONLY', True)
 
         active = (self.class_count >= min_count).clone()
         active[0] = False
         if tail_only:
-            # TEPA: only align tail classes (freq < median frequency)
-            # to preserve head prototype discriminability established by PR
             rel_prop = list(_rcfg.REL_PROP)
-            freq = [0.0] + list(rel_prop)  # index 0 = background
+            freq = [0.0] + list(rel_prop)
             median_freq = sorted(rel_prop)[len(rel_prop) // 2]
             for _c in range(1, self.num_rel_cls):
                 if freq[_c] >= median_freq:

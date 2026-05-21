@@ -600,57 +600,28 @@ _C.DTYPE = "float32"
 # Enable verbosity in apex.amp
 _C.AMP_VERBOSE = False
 
-# ============================================================
-# Component 3: CB Loss Settings
-# ============================================================
+# ---------------------------------------------------------------------------- #
+# Long-tailed relation classification: class-balanced loss
+# ---------------------------------------------------------------------------- #
 _C.MODEL.ROI_RELATION_HEAD.USE_CB_LOSS = False
-_C.MODEL.ROI_RELATION_HEAD.CB_LOSS_BETA = 0.9999
+_C.MODEL.ROI_RELATION_HEAD.CB_LOSS_BETA = 0.9995
 
-# ============================================================
-# Component 1 (Primary): A2 - Prototype-Margin Predicate Relabeling
-# ============================================================
-_C.MODEL.ROI_RELATION_HEAD.USE_PMR_RELABEL = False
-_C.MODEL.ROI_RELATION_HEAD.PMR_RELABEL_FILE = ""
+# ---------------------------------------------------------------------------- #
+# TEPA: Tail-aware Empirical Prototype Alignment
+# Aligns tail predicate prototypes with their empirical relation centers.
+# ---------------------------------------------------------------------------- #
+_C.MODEL.ROI_RELATION_HEAD.USE_TEPA = False
+_C.MODEL.ROI_RELATION_HEAD.TEPA_TAIL_ONLY = True
+_C.MODEL.ROI_RELATION_HEAD.TEPA_WEIGHT = 0.4
+_C.MODEL.ROI_RELATION_HEAD.TEPA_WARMUP_ITER = 5000
+_C.MODEL.ROI_RELATION_HEAD.TEPA_MIN_COUNT = 100
+_C.MODEL.ROI_RELATION_HEAD.TEPA_EMA_MOMENTUM = 0.95
+_C.MODEL.ROI_RELATION_HEAD.TEPA_STATS_INIT_PATH = ""
 
-# ============================================================
-# Component 1 (Backup): A1 - EMA Feature Memory Bank
-# ============================================================
-_C.MODEL.ROI_RELATION_HEAD.USE_A1_MEMORY = False
-_C.MODEL.ROI_RELATION_HEAD.A1_STATS_INIT_PATH = ""
-_C.MODEL.ROI_RELATION_HEAD.A1_AUG_WEIGHT = 0.3
-_C.MODEL.ROI_RELATION_HEAD.A1_N_AUG_PER_CLASS = 8
-_C.MODEL.ROI_RELATION_HEAD.A1_EMA_MOMENTUM = 0.95
-_C.MODEL.ROI_RELATION_HEAD.A1_WARMUP_ITER = 3000
-
-# ============================================================
-# Component 2 (Primary): B1 - EMA Prototype Alignment
-# ============================================================
-_C.MODEL.ROI_RELATION_HEAD.USE_B1_ALIGN = False
-_C.MODEL.ROI_RELATION_HEAD.B1_STATS_INIT_PATH = ""
-_C.MODEL.ROI_RELATION_HEAD.B1_ALIGN_WEIGHT = 0.2
-_C.MODEL.ROI_RELATION_HEAD.B1_WARMUP_ITER = 5000
-_C.MODEL.ROI_RELATION_HEAD.B1_MIN_COUNT = 100
-
-# ============================================================
-# Component 2 (Backup): B3 - SOPR
-# ============================================================
-_C.MODEL.ROI_RELATION_HEAD.USE_B3_SOPR = False
-_C.MODEL.ROI_RELATION_HEAD.B3_TOPK = 5
-_C.MODEL.ROI_RELATION_HEAD.B3_HIDDEN_DIM = 500
-_C.MODEL.ROI_RELATION_HEAD.B3_REFINE_SCALE_TARGET = 0.1
-_C.MODEL.ROI_RELATION_HEAD.B3_WARMUP_ITER = 5000
-
-
-# ============================================================
-# Stage 2 (DPL framework): TEPA + RPR settings
-# ============================================================
-_C.MODEL.ROI_RELATION_HEAD.B1_TAIL_ONLY = True   # TEPA: only align tail classes (freq < median)
-_C.MODEL.ROI_RELATION_HEAD.B1_PR_BOOST = 1.0     # RPR: l21_loss multiplier (1.0=disabled, >1.0=stronger PR)
-
-
-# ============================================================
-# CPTR: Confusion-Pair Targeted Repulsion (v2)
-# ============================================================
+# ---------------------------------------------------------------------------- #
+# CPTR: Confusion-Pair Targeted Repulsion
+# Pushes tail prototypes away from confusable head counterparts.
+# ---------------------------------------------------------------------------- #
 _C.MODEL.ROI_RELATION_HEAD.USE_CPTR = False
 _C.MODEL.ROI_RELATION_HEAD.CPTR_PAIRS_PATH = ""
 _C.MODEL.ROI_RELATION_HEAD.CPTR_WEIGHT = 0.05
